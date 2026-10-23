@@ -1,0 +1,206 @@
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+# check=error=true
+
+ARG BASE_IMAGE=ubuntu:26.04
+
+FROM ${BASE_IMAGE} AS rust
+ARG DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+# The base image's packages are recorded before anything is installed, so that
+# runtime-deps can leave them out. Every image that installs runtime-deps is
+# built on the same base.
+RUN dpkg-query -W -f '${Package}\n' | LC_ALL=C sort -u > /tmp/base-packages; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      build-essential \
+      ca-certificates \
+      curl \
+      git \
+      gpgv \
+      python3 \
+      xz-utils; \
+    rm -rf /var/lib/apt/lists/*
+
+# Rust comes from static.rust-lang.org instead of the distro, so that both
+# distros build with the same release. The release manifest is pinned in
+# package.yml and signed with the Rust release key, fingerprint
+# 108F 6620 5EAE B0AA A8DD 5E1C 85AB 96E6 FA1B E5FE; it lists the SHA-256 of
+# every archive that rust-toolchain.sh installs.
+ARG RUST_TOOLCHAIN_VERSION
+ARG RUST_TOOLCHAIN_SHA256
+ADD --checksum=sha256:${RUST_TOOLCHAIN_SHA256} https://static.rust-lang.org/dist/channel-rust-${RUST_TOOLCHAIN_VERSION}.toml /tmp/rust/
+ADD https://static.rust-lang.org/dist/channel-rust-${RUST_TOOLCHAIN_VERSION}.toml.asc /tmp/rust/
+COPY keys/rust.gpg /tmp/rust.gpg
+ARG TARGETARCH
+RUN --mount=type=bind,source=scripts/rust-toolchain.sh,target=/tmp/rust-toolchain.sh \
+    case "${TARGETARCH}" in \
+      amd64) arch=x86_64 ;; \
+      arm64) arch=aarch64 ;; \
+      *) echo "unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    manifest="/tmp/rust/channel-rust-${RUST_TOOLCHAIN_VERSION}.toml"; \
+    gpgv --keyring /tmp/rust.gpg "${manifest}.asc" "$manifest"; \
+    sh /tmp/rust-toolchain.sh "$manifest" "${RUST_TOOLCHAIN_VERSION}" "${arch}-unknown-linux-gnu" \
+      /opt/rust /opt/rust-src > /tmp/rust-toolchain
+ENV PATH=/opt/rust/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    CARGO_HOME=/opt/cargo \
+    CARGO_INCREMENTAL=0 \
+    CARGO_NET_RETRY=5 \
+    CARGO_TERM_COLOR=never
+
+# cargo-auditable is built from its crate, with the crates in its Cargo.lock.
+# It runs only in the build stage below. hadolint does not carry SHELL from
+# one stage into the next, so each stage repeats it.
+FROM rust AS auditable
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG CARGO_AUDITABLE_VERSION
+ARG CARGO_AUDITABLE_SHA256
+ADD --checksum=sha256:${CARGO_AUDITABLE_SHA256} https://static.crates.io/crates/cargo-auditable/cargo-auditable-${CARGO_AUDITABLE_VERSION}.crate /tmp/
+RUN mkdir /src; \
+    tar -xzf "/tmp/cargo-auditable-${CARGO_AUDITABLE_VERSION}.crate" -C /src; \
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')" \
+      --manifest-path "/src/cargo-auditable-${CARGO_AUDITABLE_VERSION}/Cargo.toml"
+ARG JOBS
+RUN --network=none \
+    cargo install --frozen --root /opt/cargo-auditable -j "${JOBS:-$(nproc)}" \
+      --path "/src/cargo-auditable-${CARGO_AUDITABLE_VERSION}"
+
+FROM rust AS build
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+# YARA-X attaches no source tarball to its releases, so the release tag is
+# cloned and must point to the commit pinned in package.yml.
+ARG VERSION
+ARG SOURCE_COMMIT
+RUN printf '%s\n' "${VERSION}" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' \
+      || { echo "unexpected VERSION: ${VERSION}" >&2; exit 1; }; \
+    printf '%s\n' "${SOURCE_COMMIT}" | grep -Eqx '[0-9a-f]{40}' \
+      || { echo "SOURCE_COMMIT must be a full commit id" >&2; exit 1; }; \
+    git -c advice.detachedHead=false clone --quiet --depth 1 --branch "v${VERSION}" \
+      https://github.com/VirusTotal/yara-x.git /src/yara-x; \
+    test "$(git -C /src/yara-x rev-parse HEAD)" = "${SOURCE_COMMIT}" \
+      || { echo "tag v${VERSION} is not commit ${SOURCE_COMMIT}" >&2; exit 1; }
+WORKDIR /src/yara-x
+# Upstream's .cargo/config.toml applies to this build. It sets a linker and
+# rustflags for x86_64-unknown-linux-musl only, so nothing in it applies to
+# the glibc targets here; a change stops the build until it has been read and
+# its new SHA-256 is in cargo-config.sha256. cargo fetch then downloads the
+# crates in Cargo.lock for this platform and checks each against its checksum
+# there.
+RUN --mount=type=bind,source=cargo-config.sha256,target=/tmp/cargo-config.sha256 \
+    if [ -e .cargo/config ]; then echo "upstream ships .cargo/config, which this build does not check" >&2; exit 1; fi; \
+    if [ -f .cargo/config.toml ]; then \
+      test -f /tmp/cargo-config.sha256 \
+        || { cat .cargo/config.toml >&2; echo "upstream added .cargo/config.toml: read it, then pin it in cargo-config.sha256" >&2; exit 1; }; \
+      sha256sum -c /tmp/cargo-config.sha256 \
+        || { cat .cargo/config.toml >&2; echo "upstream changed .cargo/config.toml: read it, then pin it again" >&2; exit 1; }; \
+    elif [ -f /tmp/cargo-config.sha256 ]; then \
+      echo "cargo-config.sha256 pins a file that upstream no longer ships" >&2; exit 1; \
+    fi; \
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"; \
+    cargo pkgid --frozen -p yara-x-cli > /tmp/pkgid; \
+    case "$(cat /tmp/pkgid)" in \
+      *"#${VERSION}" | *"@${VERSION}") ;; \
+      *) echo "yara-x-cli is not version ${VERSION}: $(cat /tmp/pkgid)" >&2; exit 1 ;; \
+    esac
+
+# The build has no network: it reads only the crates fetched above.
+# cargo-auditable stores the list of crates in the binary's .dep-v0 section,
+# where SBOM tools and image scanners find it. release-lto is the profile of
+# upstream's release binaries: the release profile with link-time
+# optimization and one code generation unit.
+COPY --link --from=auditable /opt/cargo-auditable/bin/cargo-auditable /opt/rust/bin/
+ARG JOBS
+RUN --network=none \
+    cargo auditable build --frozen --profile release-lto -p yara-x-cli --bin yr -j "${JOBS:-$(nproc)}"; \
+    install -D -m 755 target/release-lto/yr /out/usr/local/bin/yr; \
+    bin=/out/usr/local/bin/yr; \
+    "$bin" --version > /tmp/yr-version; \
+    test "$(cat /tmp/yr-version)" = "yara-x-cli ${VERSION}" \
+      || { echo "expected yara-x-cli ${VERSION}, got: $(cat /tmp/yr-version)" >&2; exit 1; }; \
+    readelf -hlSW "$bin" > /tmp/yr-elf; \
+    grep -Eq '^ *Type: +DYN ' /tmp/yr-elf || { cat /tmp/yr-elf >&2; exit 1; }; \
+    grep -Fq '[Requesting program interpreter: /lib' /tmp/yr-elf \
+      || { echo "yr is not dynamically linked" >&2; exit 1; }; \
+    grep -Fq ' .dep-v0 ' /tmp/yr-elf || { echo "yr has no cargo-auditable data" >&2; exit 1; }
+
+ARG BASE_IMAGE
+ARG RUST_TOOLCHAIN_VERSION
+ARG CARGO_AUDITABLE_VERSION
+ARG CARGO_AUDITABLE_SHA256
+# YARA-X's license and the AUTHORS file its copyright line refers to come
+# from the tag, and so does the license of the Teddy code it took from
+# aho-corasick. Its TLSH code came from tlsh-rs, whose license is in
+# licenses/; the build stops when the code no longer names tlsh-rs, so that
+# the file is checked again. cargo-licenses.py copies the license files of
+# every crate that the binary records and of the Rust standard library, and
+# stops when a crate's license is not covered by package.yml's license.
+# licenses/crates holds the texts that crates do not ship. The psl crate goes
+# to crate-sources, because the Public Suffix List it compiles in is MPL-2.0.
+# runtime-deps lists the packages that own the libraries yr loads, minus the
+# base image's packages, plus the packages in runtime-deps.ubuntu.
+RUN --network=none \
+    --mount=type=bind,source=scripts/cargo-licenses.py,target=/tmp/cargo-licenses.py \
+    --mount=type=bind,source=licenses,target=/tmp/licenses \
+    --mount=type=bind,source=package.yml,target=/tmp/package.yml \
+    --mount=type=bind,source=runtime-deps.ubuntu,target=/tmp/runtime-deps.extra \
+    meta=/out/usr/local/share/randomcontainers/yara-x; \
+    mkdir -p "$meta/licenses/teddy" "$meta/licenses/tlsh-rs"; \
+    cp LICENSE AUTHORS "$meta/licenses/"; \
+    grep -Fq 'Andrew Gallant' lib/src/teddy/LICENSE-MIT.md \
+      || { echo "lib/src/teddy/LICENSE-MIT.md no longer names Andrew Gallant" >&2; exit 1; }; \
+    cp lib/src/teddy/LICENSE-MIT.md "$meta/licenses/teddy/"; \
+    grep -Fq 'https://github.com/Uinelj/tlsh-rs' lib/src/modules/elf/tlsh/mod.rs \
+      || { echo "the TLSH code no longer names tlsh-rs: check licenses/tlsh-rs" >&2; exit 1; }; \
+    cp /tmp/licenses/tlsh-rs/LICENSE-BSD "$meta/licenses/tlsh-rs/"; \
+    python3 -I /tmp/cargo-licenses.py \
+      --binary /out/usr/local/bin/yr --workspace /src/yara-x --package-yml /tmp/package.yml \
+      --extra /tmp/licenses/crates --rust-src /opt/rust-src \
+      --licenses "$meta/licenses" --sources "$meta/crate-sources" > /tmp/crates; \
+    echo "${VERSION}" > "$meta/version"; \
+    { \
+      echo "https://github.com/VirusTotal/yara-x.git@${SOURCE_COMMIT}"; \
+      echo "https://github.com/VirusTotal/yara-x/tree/${SOURCE_COMMIT}"; \
+      echo "https://static.rust-lang.org/dist/channel-rust-${RUST_TOOLCHAIN_VERSION}.toml"; \
+      sed -n 's/^rust-src: \([^ ]*\) .*$/\1/p' /tmp/rust-toolchain; \
+      echo "https://static.crates.io/crates/cargo-auditable/cargo-auditable-${CARGO_AUDITABLE_VERSION}.crate"; \
+      sed -n 's/^source: //p' /tmp/crates; \
+    } > "$meta/source"; \
+    { \
+      echo "base: ${BASE_IMAGE}"; \
+      echo "commit: ${SOURCE_COMMIT}"; \
+      echo "rust: ${RUST_TOOLCHAIN_VERSION}"; \
+      cat /tmp/rust-toolchain; \
+      rustc -vV; \
+      echo "linker: $(cc --version | sed -n 1p)"; \
+      echo "cargo-auditable: ${CARGO_AUDITABLE_VERSION} ${CARGO_AUDITABLE_SHA256}"; \
+      echo "profile: release-lto"; \
+      echo "rustflags: ${RUSTFLAGS:-}"; \
+      cat /tmp/yr-version; \
+      echo "crates:"; \
+      sed -n 's/^crate: /  /p' /tmp/crates; \
+    } > "$meta/buildinfo"; \
+    find /out/usr/local -type f \( -perm -u+x -o -name '*.so*' \) -print0 \
+      | xargs -0 env LD_LIBRARY_PATH=/out/usr/local/lib ldd > /tmp/ldd 2>&1 || true; \
+    if grep 'not found' /tmp/ldd; then exit 1; fi; \
+    awk '$2 == "=>" && $3 ~ /^\// && $3 !~ /^\/out\// { print $3 }' /tmp/ldd | sort -u > /tmp/libs; \
+    test -s /tmp/libs; \
+    while read -r lib; do \
+      real="$(readlink -f "$lib")"; \
+      dpkg-query --search "*${real#/usr}"; \
+    done < /tmp/libs | cut -d: -f1 | LC_ALL=C sort -u | LC_ALL=C comm -23 - /tmp/base-packages > /tmp/elf-deps; \
+    LC_ALL=C sort -u /tmp/elf-deps /tmp/runtime-deps.extra > "$meta/runtime-deps"
+
+FROM ${BASE_IMAGE} AS slim
+ARG DEBIAN_FRONTEND=noninteractive
+RUN --mount=type=bind,from=build,source=/out/usr/local/share/randomcontainers/yara-x/runtime-deps,target=/tmp/runtime-deps \
+    set -eu; \
+    apt-get update; \
+    xargs apt-get install -y --no-install-recommends ca-certificates tini < /tmp/runtime-deps; \
+    rm -rf /var/lib/apt/lists/*; \
+    install -d -m 1777 /work /cache
+COPY --link --from=build /out/usr/local/ /usr/local/
+ENV LANG=C.UTF-8 XDG_CACHE_HOME=/cache
+WORKDIR /work
+USER 1000:1000
+ENTRYPOINT ["tini", "--", "yr"]
+CMD ["--help"]
