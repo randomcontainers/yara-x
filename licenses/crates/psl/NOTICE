@@ -1,0 +1,12 @@
+The psl crate compiles in Mozilla's Public Suffix List
+(https://publicsuffix.org/list/public_suffix_list.dat), which the crate keeps
+as data/rules.txt and src/list.rs. The crate's own code is under the MIT
+license or the Apache License 2.0, but the list carries this notice:
+
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+The text of the Mozilla Public License 2.0 is in the file MPL-2.0 next to
+this one. The crate as published on crates.io, list included, is in
+/usr/local/share/randomcontainers/yara-x/crate-sources/ in this image.

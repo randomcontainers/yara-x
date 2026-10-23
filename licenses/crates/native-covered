@@ -1,0 +1,6 @@
+# rayon-core's links key only makes sure that a single copy is linked; it
+# builds no native code.
+rayon-core
+# regex-syntax builds no native code either. Its Unicode tables are under the
+# Unicode license in the file next to them, which this line copies.
+regex-syntax: src/unicode_tables/LICENSE-UNICODE

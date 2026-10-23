@@ -1,0 +1,18 @@
+# Extra license files
+
+Seventeen crates that yr is built from publish no license text, and the files of psl leave out the license of the data it compiles in. Each directory in `crates/` holds the texts for one of them, and `scripts/cargo-licenses.py` adds them to the crate's own files in the image. The build stops when the binary records a crate without any license file, and when a directory here or a line of `crates/native-covered` matches no crate it records.
+
+A directory named `crates/<crate>-<version>/` covers that version only, so a new version of the crate stops the build until its license is checked again. A directory named without a version, `crates/<crate>/`, is kept across versions. It has an `EXPRESSION` file with the crate's license expression, and the build stops when the crate's expression changes. The Bytecode Alliance crates below change version with every wasmtime release that YARA-X takes, and psl releases several times a week, so their directories have no version. psl's `EXPRESSION` differs from the expression the crate declares, which its `DECLARED` file holds; the build stops when the declared expression changes.
+
+| Files | Source |
+|---|---|
+| `crates/cranelift-assembler-x64/`, `crates/cranelift-assembler-x64-meta/`, `crates/cranelift-bitset/`, `crates/cranelift-isle/`, `crates/cranelift-srcgen/`, `crates/pulley-interpreter/`, `crates/pulley-macros/`, `crates/wasmtime-internal-component-util/`, `crates/wasmtime-internal-core/`, `crates/wasmtime-internal-jit-debug/`, `crates/wasmtime-internal-jit-icache-coherence/`, `crates/wasmtime-internal-versioned-export-macros/` (`LICENSE`) | `LICENSE` of [bytecodealliance/wasmtime](https://github.com/bytecodealliance/wasmtime) at v48.0.6, the repository these crates are published from. The other wasmtime and Cranelift crates ship the same file. |
+| `crates/wasm-encoder/`, `crates/wasmparser/` (`LICENSE-APACHE`, `LICENSE-Apache-2.0_WITH_LLVM-exception`, `LICENSE-MIT`) | the license files of [bytecodealliance/wasm-tools](https://github.com/bytecodealliance/wasm-tools) at v1.245.1, the release of wasm-encoder and wasmparser 0.245.1. Later versions of both crates include the same three files. |
+| `crates/asn1-rs-impl-0.2.0/` (`LICENSE-MIT`, `LICENSE-APACHE`) | the license files of [rusticata/asn1-rs](https://github.com/rusticata/asn1-rs) at asn1-rs-0.7.2, the repository asn1-rs-impl is published from |
+| `crates/ascii_tree-0.1.1/LICENSE-MIT` | the MIT License text. The crate's `Cargo.toml` says `MIT`, and neither the crate nor its repository, bpressure/ascii_tree (no longer on GitHub; the copy that Software Heritage archived in 2018 has no license file), includes the text. |
+| `crates/tinyzip-0.4.0/LICENSE-MIT` | the MIT License text. The crate's `Cargo.toml` says `MIT`, and neither the crate nor [lovasoa/tinyzip](https://github.com/lovasoa/tinyzip) at v0.4.0 includes the text. |
+| `crates/psl/MPL-2.0` | the text of the [Mozilla Public License 2.0](https://www.mozilla.org/media/MPL/2.0/index.txt) |
+| `crates/psl/NOTICE` | written for this repository: psl compiles in the Public Suffix List, which is under MPL-2.0 |
+| `crates/psl/DECLARED`, `crates/psl/EXPRESSION` | psl declares `MIT/Apache-2.0`; `EXPRESSION` adds MPL-2.0 for the list, so the crate's source goes into the image |
+| `crates/native-covered` | written for this repository: rayon-core has a `links` key but builds no native code, and regex-syntax keeps the license of its Unicode tables in `src/unicode_tables/LICENSE-UNICODE` |
+| `tlsh-rs/LICENSE-BSD` | `LICENSE-BSD` of [Uinelj/tlsh-rs](https://github.com/Uinelj/tlsh-rs), added in commit f8b02370. YARA-X's TLSH code in `lib/src/modules/elf/tlsh/` was taken from that repository, which offers it under BSD-3-Clause or Apache-2.0. |
