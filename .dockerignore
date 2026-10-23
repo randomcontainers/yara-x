@@ -3,6 +3,7 @@
 !keys/rust.gpg
 !licenses
 !package.yml
+!runtime-deps.alpine
 !runtime-deps.ubuntu
 !scripts/cargo-licenses.py
 !scripts/rust-toolchain.sh
