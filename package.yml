@@ -1,0 +1,502 @@
+name: yara-x
+title: YARA-X
+summary: Scans files and directories with YARA rules, using YARA-X, the successor of YARA, and compiles and formats rule files.
+homepage: https://virustotal.github.io/yara-x/
+# YARA-X is BSD-3-Clause. Its Teddy matcher is code from aho-corasick (MIT),
+# and its TLSH code comes from tlsh-rs (BSD-3-Clause OR Apache-2.0, of which
+# BSD-3-Clause is used). Most of the crates compiled into yr are under
+# MIT OR Apache-2.0 or MIT, and the label takes MIT wherever a crate offers
+# it. wasmtime, Cranelift, Pulley, regalloc2 and target-lexicon are under
+# Apache-2.0 WITH LLVM-exception only, zopfli is Apache-2.0 only and dunce
+# offers CC0-1.0, MIT-0 or Apache-2.0. foldhash and zlib-rs are Zlib, subtle
+# is BSD-3-Clause, encoding_rs includes WHATWG data under BSD-3-Clause and
+# unicode-ident includes Unicode data under Unicode-3.0. regex-syntax
+# compiles in Unicode tables under the Unicode license that ships with them
+# (Unicode-DFS-2016). psl compiles in Mozilla's Public Suffix List, which is
+# MPL-2.0 although the crate declares MIT or Apache-2.0, so the psl crate is
+# copied into the image. The Rust standard library and the crates it uses
+# are MIT or a choice that includes it, with compiler-builtins also under
+# Apache-2.0 WITH LLVM-exception. The build reads this line and stops when a
+# crate linked into yr has a license that it does not cover.
+license: BSD-3-Clause AND MIT AND Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND Zlib AND Unicode-3.0 AND Unicode-DFS-2016 AND MPL-2.0
+upstream:
+  source: github-release
+  repository: VirusTotal/yara-x
+  # Release tags look like v1.22.0. The tags of the Go module (go/v1.22.0)
+  # do not match. Upstream creates each release as a draft and publishes it
+  # a few hours later; only published releases are read.
+  tag-pattern: '^v(\d+\.\d+\.\d+)$'
+  version-template: '{1}'
+  versioning: semver
+  version: 1.22.0
+  # The release tag is built with its Cargo.lock, and cargo checks every crate
+  # it downloads against the checksum there.
+  git:
+    url: https://github.com/VirusTotal/yara-x.git
+    tag: v{version}
+    commit: e27597f2c05e13fe1c2bb459781aef8899afc485
+  extra-artifacts:
+    # The Rust release manifest, signed with the Rust release key. The build
+    # installs rustc, cargo, rust-std and rust-src from the archives it lists,
+    # each checked against the SHA-256 the manifest gives. The reconciler moves
+    # version and sha256 to each new stable release once it is 7 days old.
+    rust-toolchain:
+      version: 1.99.1
+      url: https://static.rust-lang.org/dist/channel-rust-{version}.toml
+      checksums: {url: 'https://static.rust-lang.org/dist/channel-rust-{version}.toml.sha256', algorithm: sha256}
+      signature: https://static.rust-lang.org/dist/channel-rust-{version}.toml.asc
+      sha256: fb152be80975c194aa5fc684b2aec3a6e14e2b855efe2faa4e5f8ae6e590f463
+      track:
+        source: html-index
+        url: https://static.rust-lang.org/dist/channel-rust-stable.toml
+        pattern: '^url = "https://static\.rust-lang\.org/dist/(?P<date>\d{4}-\d{2}-\d{2})/rustc-(?P<version>\d+\.\d+\.\d+)-x86_64-unknown-linux-gnu\.tar\.gz"$'
+        versioning: semver
+        cooldown: 7d
+        skip: []
+    # Built from its crate and used only in the build stage. It stores the
+    # list of crates in the yr binary, where SBOM tools and image scanners
+    # read it. Update version and sha256 together, with the checksum from the
+    # crates.io index.
+    cargo-auditable:
+      version: 0.7.7
+      url: https://static.crates.io/crates/cargo-auditable/cargo-auditable-{version}.crate
+      sha256: ccdd489bc94d1338cd04389a842e00661300331ec915fb376b4810ef7d480b5d
+image:
+  entrypoint: [yr]
+  cmd: [--help]
+test:
+  - |
+    yr --version > version.txt
+    test "$(cat version.txt)" = "yara-x-cli $VERSION" \
+      || { echo "expected 'yara-x-cli $VERSION', got '$(cat version.txt)'" >&2; exit 1; }
+    banner="YARA-X $VERSION, the pattern matching swiss army knife."
+    yr --help > help.txt
+    grep -Fxq "$banner" help.txt || { echo "expected '$banner' in yr --help, got:" >&2; cat help.txt >&2; exit 1; }
+    if yr > usage.txt 2>&1; then echo "yr without arguments should fail" >&2; exit 1; fi
+    grep -Fxq "$banner" usage.txt || { echo "expected the help text from yr without arguments, got:" >&2; cat usage.txt >&2; exit 1; }
+    yr completion bash > yr.bash
+    grep -Fq '_yr()' yr.bash || { echo "expected the bash function _yr, got:" >&2; head -n 20 yr.bash >&2; exit 1; }
+  - |
+    # Text, hex, regular expression and wide strings on a 45-byte sample. The
+    # offsets in the expected output are those of the bytes printf writes.
+    cat > rules.yar <<'EOF'
+    rule text_nocase : demo
+    {
+      meta:
+        description = "two markers"
+      strings:
+        $a = "marker-one" nocase
+      condition:
+        #a == 2 and @a[1] < 16
+    }
+
+    rule hex_jump
+    {
+      strings:
+        $h = { 52 43 [2-4] 54 }
+      condition:
+        $h
+    }
+
+    rule regex_digits
+    {
+      strings:
+        $r = /id=[0-9]{4}/
+      condition:
+        $r
+    }
+
+    rule wide_text
+    {
+      strings:
+        $w = "wide" wide
+      condition:
+        $w
+    }
+
+    rule absent
+    {
+      strings:
+        $x = "not in the sample"
+      condition:
+        $x
+    }
+    EOF
+    printf 'MARKER-ONE\000\000RCzzT\000id=2026\000w\000i\000d\000e\000marker-one\n' > sample.bin
+    n=$(wc -c < sample.bin)
+    [ "$n" -eq 45 ] || { echo "sample.bin is $n bytes, expected 45:" >&2; od -c sample.bin >&2; exit 1; }
+    check() {
+      if ! cmp -s "$1" "$2"; then
+        { echo "expected:"; cat "$1"; echo "got:"; cat "$2"; } >&2
+        exit 1
+      fi
+    }
+    yr scan -s rules.yar sample.bin > strings.txt
+    cat > want.txt <<'EOF'
+    text_nocase sample.bin
+    0x0:10:$a: MARKER-ONE
+    0x22:10:$a: marker-one
+    hex_jump sample.bin
+    0xc:5:$h: 52 43 7a 7a 54
+    regex_digits sample.bin
+    0x12:7:$r: id=2026
+    wide_text sample.bin
+    0x1a:8:$w: w\x00i\x00d\x00e\x00
+    EOF
+    check want.txt strings.txt
+    yr scan -n rules.yar sample.bin > negate.txt
+    printf '%s\n' 'absent sample.bin' > want.txt
+    check want.txt negate.txt
+    yr scan -c rules.yar sample.bin > count.txt
+    printf '%s\n' 'sample.bin: 4' > want.txt
+    check want.txt count.txt
+    yr scan -e -g -m -t demo rules.yar sample.bin > meta.txt
+    printf '%s\n' 'default:text_nocase [demo] [description="two markers"] sample.bin' > want.txt
+    check want.txt meta.txt
+    yr scan -o ndjson -s -t demo rules.yar sample.bin > ndjson.txt
+    cat > want.txt <<'EOF'
+    {"path":"sample.bin","rules":[{"identifier":"text_nocase","strings":[{"identifier":"$a","offset":0,"match":"MARKER-ONE"},{"identifier":"$a","offset":34,"match":"marker-one"}]}]}
+    EOF
+    check want.txt ndjson.txt
+    # External variables take JSON values, so a string is quoted.
+    printf '%s\n' 'rule strict_mode { condition: mode == "strict" and level > 10 }' > external.yar
+    yr scan -d 'mode="strict"' -d level=20 external.yar sample.bin > external.txt
+    printf '%s\n' 'strict_mode sample.bin' > want.txt
+    check want.txt external.txt
+    yr scan -d 'mode="loose"' -d level=20 external.yar sample.bin > external.txt
+    [ ! -s external.txt ] || { echo "expected no match with mode=loose, got:" >&2; cat external.txt >&2; exit 1; }
+  - |
+    # yr compile writes the rules of the previous test in binary form, and
+    # yr scan -C loads them. check, fmt and fix work on rule sources.
+    check() {
+      if ! cmp -s "$1" "$2"; then
+        { echo "expected:"; cat "$1"; echo "got:"; cat "$2"; } >&2
+        exit 1
+      fi
+    }
+    yr compile -o rules.yarc rules.yar
+    head -c 6 rules.yarc > header.txt
+    printf 'YARA-X' > want.txt
+    check want.txt header.txt
+    yr scan -C -s rules.yarc sample.bin > compiled.txt
+    check strings.txt compiled.txt
+    if yr scan -C rules.yar sample.bin 2> source.txt; then echo "yr scan -C loaded rules in source form" >&2; exit 1; fi
+    grep -Fq 'not a YARA-X compiled rules file' source.txt || { echo "expected 'not a YARA-X compiled rules file', got:" >&2; cat source.txt >&2; exit 1; }
+    cat > good.yar <<'EOF'
+    rule good { strings: $a = "marker" condition: $a }
+    EOF
+    printf '%s\n' 'rule broken { condition: }' > broken.yar
+    yr check good.yar > check.txt
+    printf '%s\n' '[ PASS ] good.yar' > want.txt
+    check want.txt check.txt
+    status=0
+    yr check broken.yar > check.txt 2> check.err || status=$?
+    test "$status" = 1 || { echo "expected exit status 1 from yr check, got $status" >&2; exit 1; }
+    printf '%s\n' '[ FAIL ] broken.yar' > want.txt
+    check want.txt check.txt
+    grep -Fq 'broken.yar:1:' check.err || { echo "expected the location broken.yar:1, got:" >&2; cat check.err >&2; exit 1; }
+    if yr compile -o broken.yarc broken.yar 2> broken.txt; then echo "yr compile accepted a syntax error" >&2; exit 1; fi
+    grep -Fq 'broken.yar:1:' broken.txt || { echo "expected the location broken.yar:1, got:" >&2; cat broken.txt >&2; exit 1; }
+    [ ! -e broken.yarc ] || { echo "yr compile wrote broken.yarc after a syntax error" >&2; exit 1; }
+    # fmt -c reports files it would change and exits with 1; fmt rewrites
+    # them, aligning metadata and strings.
+    cat > fmt.yar <<'EOF'
+    rule test {
+      meta:
+        one = 1
+        two = 2
+        three = 3
+      strings:
+        $short = "foo"
+        $longer = "bar"
+        $very_long = "baz"
+      condition:
+        true
+    }
+    EOF
+    cp fmt.yar fmt.orig
+    status=0
+    yr fmt -c fmt.yar 2> fmt.err || status=$?
+    test "$status" = 1 || { echo "expected exit status 1 from yr fmt -c, got $status" >&2; exit 1; }
+    grep -Fxq fmt.yar fmt.err || { echo "expected yr fmt -c to name fmt.yar, got:" >&2; cat fmt.err >&2; exit 1; }
+    check fmt.orig fmt.yar
+    status=0
+    yr fmt fmt.yar || status=$?
+    test "$status" = 1 || { echo "expected exit status 1 from yr fmt, got $status" >&2; exit 1; }
+    cat > want.txt <<'EOF'
+    rule test {
+      meta:
+        one   = 1
+        two   = 2
+        three = 3
+
+      strings:
+        $short     = "foo"
+        $longer    = "bar"
+        $very_long = "baz"
+
+      condition:
+        true
+    }
+    EOF
+    check want.txt fmt.yar
+    yr fmt -c fmt.yar
+    # fix warnings applies the changes that warnings suggest.
+    cat > fix.yar <<'EOF'
+    rule test {
+      strings:
+        $a = "dummy"
+      condition:
+        0 of them
+    }
+    EOF
+    yr fix warnings fix.yar > fix.txt 2> fix.err
+    printf '%s\n' '1 out of 1 warning(s) fixed, 1 file(s) modified' > want.txt
+    check want.txt fix.txt
+    cat > want.txt <<'EOF'
+    rule test {
+      strings:
+        $a = "dummy"
+      condition:
+        none of them
+    }
+    EOF
+    check want.txt fix.yar
+    printf '%s\n' 'rule a { condition: pe.is_dll() } rule b { condition: a }' > deps.yar
+    yr deps deps.yar > deps.txt
+    test "$(grep -c 'mod: pe' deps.txt)" = 2 || { echo "expected rules a and b to depend on pe, got:" >&2; cat deps.txt >&2; exit 1; }
+  - |
+    # Directories are scanned to the depth that -r gives, one level without
+    # it. The order of the results depends on the threads.
+    mkdir -p tree/a/b tree/c
+    cp sample.bin tree/one.bin
+    cp sample.bin tree/a/two.bin
+    cp sample.bin tree/a/b/three.bin
+    printf 'nothing to find here\n' > tree/c/plain.txt
+    cat > digits.yar <<'EOF'
+    rule regex_digits { strings: $r = /id=[0-9]{4}/ condition: $r }
+    EOF
+    check() {
+      if ! cmp -s "$1" "$2"; then
+        { echo "expected:"; cat "$1"; echo "got:"; cat "$2"; } >&2
+        exit 1
+      fi
+    }
+    yr scan digits.yar tree > raw.txt
+    printf '%s\n' 'regex_digits tree/one.bin' > want.txt
+    check want.txt raw.txt
+    yr scan -r -p 2 digits.yar tree > raw.txt
+    LC_ALL=C sort raw.txt > tree.txt
+    printf '%s\n' 'regex_digits tree/a/b/three.bin' 'regex_digits tree/a/two.bin' 'regex_digits tree/one.bin' > want.txt
+    check want.txt tree.txt
+    yr scan --recursive=1 digits.yar tree > raw.txt
+    LC_ALL=C sort raw.txt > tree.txt
+    printf '%s\n' 'regex_digits tree/a/two.bin' 'regex_digits tree/one.bin' > want.txt
+    check want.txt tree.txt
+    printf '%s\n' tree/c/plain.txt tree/a/two.bin > list.txt
+    yr scan --scan-list digits.yar list.txt > listed.txt
+    printf '%s\n' 'regex_digits tree/a/two.bin' > want.txt
+    check want.txt listed.txt
+    printf '%s\n' tree/a/b/three.bin | yr scan --scan-list digits.yar - > listed.txt
+    printf '%s\n' 'regex_digits tree/a/b/three.bin' > want.txt
+    check want.txt listed.txt
+  - |
+    # Module functions on the well-known pangram. console.log writes to
+    # standard error, after the file name.
+    check() {
+      if ! cmp -s "$1" "$2"; then
+        { echo "expected:"; cat "$1"; echo "got:"; cat "$2"; } >&2
+        exit 1
+      fi
+    }
+    printf 'The quick brown fox jumps over the lazy dog' > fox.txt
+    cat > hash.yar <<'EOF'
+    import "hash"
+    import "math"
+
+    rule fox_hashes
+    {
+      condition:
+        hash.md5(0, filesize) == "9e107d9d372bb6826bd81d3542a419d6" and
+        hash.sha1(0, filesize) == "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12" and
+        hash.sha256(0, filesize) == "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592" and
+        hash.crc32(0, filesize) == 0x414fa339 and
+        math.entropy(0, filesize) > 4.4 and math.entropy(0, filesize) < 4.5
+    }
+    EOF
+    yr scan hash.yar fox.txt > hash.txt
+    printf '%s\n' 'fox_hashes fox.txt' > want.txt
+    check want.txt hash.txt
+    # A text file is no PE, .NET, Mach-O, DEX, LNK or CRX file.
+    cat > other.yar <<'EOF'
+    import "console"
+    import "string"
+    import "time"
+    import "pe"
+    import "dotnet"
+    import "macho"
+    import "dex"
+    import "lnk"
+    import "crx"
+
+    rule other_modules
+    {
+      condition:
+        console.log("length: ", string.length("marker")) and
+        string.to_int("1f", 16) == 31 and
+        time.now() > 1700000000 and
+        not pe.is_pe and
+        not dotnet.is_dotnet and
+        not defined macho.magic and
+        not dex.is_dex and
+        not lnk.is_lnk and
+        not crx.is_crx
+    }
+    EOF
+    yr scan other.yar fox.txt > other.txt 2> console.txt
+    printf '%s\n' 'other_modules fox.txt' > want.txt
+    check want.txt other.txt
+    grep -Fxq 'fox.txt: length: 6' console.txt || { echo "expected 'fox.txt: length: 6' on standard error, got:" >&2; cat console.txt >&2; exit 1; }
+  - |
+    # The elf module reads yr itself: a dynamically linked program with the
+    # .dep-v0 section that lists its crates.
+    cat > elf.yar <<'EOF'
+    import "elf"
+
+    rule rust_program
+    {
+      condition:
+        (elf.type == elf.ET_EXEC or elf.type == elf.ET_DYN) and
+        (elf.machine == elf.EM_X86_64 or elf.machine == elf.EM_AARCH64) and
+        (for any s in elf.sections : (s.name == ".dep-v0")) and
+        (for any p in elf.segments : (p.type == elf.PT_INTERP))
+    }
+    EOF
+    yr scan elf.yar /usr/local/bin/yr > elf.txt
+    test "$(cat elf.txt)" = 'rust_program /usr/local/bin/yr' \
+      || { echo "expected 'rust_program /usr/local/bin/yr', got:" >&2; cat elf.txt >&2; exit 1; }
+    yr dump -m elf -o json /usr/local/bin/yr > dump.json
+    grep -Eq '"machine": "EM_(X86_64|AARCH64)"' dump.json || { echo "expected the machine in yr dump, got:" >&2; head -n 30 dump.json >&2; exit 1; }
+    grep -Fq '"name": ".dep-v0"' dump.json || { echo "expected the .dep-v0 section in yr dump" >&2; exit 1; }
+    # The cuckoo module reads a sandbox report passed with -x.
+    printf 'The quick brown fox jumps over the lazy dog' > fox.txt
+    cat > report.json <<'EOF'
+    {"network": {"http": [{"uri": "http://example.test/payload.bin", "method": "GET"}],
+                 "domains": [{"ip": "192.0.2.10", "domain": "example.test"}]},
+     "behavior": {"summary": {"mutexes": ["demo-mutex"], "files": ["/tmp/dropped.txt"], "keys": []}}}
+    EOF
+    cat > cuckoo.yar <<'EOF'
+    import "cuckoo"
+
+    rule sandbox_report
+    {
+      condition:
+        cuckoo.network.http_get(/example\.test\/payload/) and
+        not cuckoo.network.http_post(/example\.test/) and
+        cuckoo.network.dns_lookup(/^example\.test$/) and
+        cuckoo.sync.mutex(/^demo-mutex$/) and
+        cuckoo.filesystem.file_access(/dropped\.txt$/)
+    }
+    EOF
+    yr scan -x cuckoo=report.json cuckoo.yar fox.txt > cuckoo.txt
+    test "$(cat cuckoo.txt)" = 'sandbox_report fox.txt' \
+      || { echo "expected 'sandbox_report fox.txt', got:" >&2; cat cuckoo.txt >&2; exit 1; }
+    yr scan cuckoo.yar fox.txt > cuckoo.txt
+    [ ! -s cuckoo.txt ] || { echo "expected no match without a report, got:" >&2; cat cuckoo.txt >&2; exit 1; }
+  - |
+    # 3,000 rules are compiled to native code, saved and loaded again. A
+    # condition over upstream's size limit is refused with E048, and
+    # --ignore-invalid-rules keeps the other rules.
+    awk 'BEGIN { for (i = 0; i < 3000; i++) printf "rule r%d { strings: $a = \"tok%d-\" condition: $a and for any n in (1, 2, 3) : (uint8(@a[1]) == 0x73 + n) }\n", i, i }' > many.yar
+    printf 'tok7- tok42- tok2999-\n' > many.bin
+    check() {
+      if ! cmp -s "$1" "$2"; then
+        { echo "expected:"; cat "$1"; echo "got:"; cat "$2"; } >&2
+        exit 1
+      fi
+    }
+    yr scan many.yar many.bin > raw.txt 2> many.err || { tail -n 20 many.err >&2; exit 1; }
+    LC_ALL=C sort raw.txt > many.txt
+    printf '%s\n' 'r2999 many.bin' 'r42 many.bin' 'r7 many.bin' > want.txt
+    check want.txt many.txt
+    yr compile -o many.yarc many.yar 2> many.err || { tail -n 20 many.err >&2; exit 1; }
+    yr scan -C -c many.yarc many.bin > count.txt
+    printf '%s\n' 'many.bin: 3' > want.txt
+    check want.txt count.txt
+    awk 'BEGIN { printf "rule ok_before { condition: true }\nrule massive { condition: filesize > 0"; for (i = 0; i < 25000; i++) printf " and filesize > 0"; printf " }\nrule ok_after { condition: true }\n" }' > big.yar
+    if yr compile -o big.yarc big.yar 2> big.err; then echo "yr compiled a condition over the size limit" >&2; exit 1; fi
+    grep -Fq 'error[E048]: condition is too large' big.err || { echo "expected error E048, got:" >&2; tail -c 2000 big.err >&2; exit 1; }
+    yr compile --ignore-invalid-rules -o big.yarc big.yar 2> big.err
+    grep -Fq 'massive: error: condition is too large' big.err || { echo "expected massive among the ignored rules, got:" >&2; tail -c 2000 big.err >&2; exit 1; }
+    yr scan -C big.yarc many.bin > raw.txt
+    LC_ALL=C sort raw.txt > big.txt
+    printf '%s\n' 'ok_after many.bin' 'ok_before many.bin' > want.txt
+    check want.txt big.txt
+examples:
+  - title: Scan a directory of samples, without network access
+    command: docker run --rm --network none --user "$(id -u):$(id -g)" -v "$PWD:/work:ro" ghcr.io/randomcontainers/yara-x scan -r rules.yar samples
+  - title: Print the strings that matched, with their offsets and lengths
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work:ro" ghcr.io/randomcontainers/yara-x scan -s rules.yar sample.bin
+  - title: Compile a rule file to binary form
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/yara-x compile -o rules.yarc rules.yar
+  - title: Format the rule files in a directory in place
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/yara-x fmt rules
+  - title: Unpack an encrypted zip of samples and scan its contents (default image)
+    command: docker run --rm --network none --user "$(id -u):$(id -g)" -v "$PWD:/work" --entrypoint sh ghcr.io/randomcontainers/yara-x -c '7zz x -pinfected -osamples samples.zip > /dev/null && yr scan -r rules.yar samples'
+combos:
+  - with: [7zip]
+    default: true
+    base: yara-x
+    summary: YARA-X with 7-Zip, for unpacking password-protected sample archives and scanning what they contain.
+    test:
+      - |
+        # Samples are usually shared in zip files encrypted with the password
+        # "infected". YARA-X does not look inside archives, so 7-Zip unpacks
+        # them first; the encrypted zip itself must not match.
+        cat > marker.yar <<'EOF'
+        rule marker { strings: $a = "MARKER-ONE" condition: $a }
+        EOF
+        printf 'MARKER-ONE inside a sample\n' > sample.txt
+        7zz a -tzip -mem=AES256 -pinfected samples.zip sample.txt > /dev/null
+        yr scan marker.yar samples.zip > zip.txt
+        if [ -s zip.txt ]; then echo "the marker is readable in the encrypted zip" >&2; cat zip.txt >&2; exit 1; fi
+        7zz x -pinfected -osamples samples.zip > /dev/null
+        yr scan -r marker.yar samples > found.txt
+        test "$(cat found.txt)" = 'marker samples/sample.txt' || { echo "expected 'marker samples/sample.txt', got:" >&2; cat found.txt >&2; exit 1; }
+      - |
+        # A 7z archive with encrypted file names, extracted to standard output
+        # and scanned from a file.
+        mkdir -p in
+        printf 'MARKER-ONE in a 7z archive\n' > in/a.txt
+        printf 'nothing to find\n' > in/b.txt
+        cat > marker.yar <<'EOF'
+        rule marker { strings: $a = "MARKER-ONE" condition: $a }
+        EOF
+        7zz a -t7z -mhe=on -pinfected samples.7z in > /dev/null
+        7zz x -so -pinfected samples.7z in/a.txt > extracted.bin
+        yr scan marker.yar extracted.bin > found.txt
+        test "$(cat found.txt)" = 'marker extracted.bin' || { echo "expected 'marker extracted.bin', got:" >&2; cat found.txt >&2; exit 1; }
+        yr scan marker.yar samples.7z > archive.txt
+        [ ! -s archive.txt ] || { echo "the marker is readable in the 7z archive:" >&2; cat archive.txt >&2; exit 1; }
+      - |
+        # The zip module lists the entries of a zip file that 7-Zip wrote,
+        # without unpacking it.
+        printf 'first\n' > a.txt
+        printf 'second\n' > b.txt
+        7zz a -tzip plain.zip a.txt b.txt > /dev/null
+        cat > entries.yar <<'EOF'
+        import "zip"
+
+        rule two_entries
+        {
+          condition:
+            zip.is_zip and
+            zip.entries.len() == 2 and
+            zip.entries[0].file_path == "a.txt" and
+            zip.entries[1].file_path == "b.txt"
+        }
+        EOF
+        yr scan entries.yar plain.zip > entries.txt
+        test "$(cat entries.txt)" = 'two_entries plain.zip' || { echo "expected 'two_entries plain.zip', got:" >&2; cat entries.txt >&2; exit 1; }
+        yr dump -m zip -o json plain.zip > zip.json
+        grep -Fq '"file_path": "b.txt"' zip.json || { echo "expected b.txt in yr dump, got:" >&2; cat zip.json >&2; exit 1; }
