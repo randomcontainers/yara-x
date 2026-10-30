@@ -28,13 +28,13 @@ upstream:
   tag-pattern: '^v(\d+\.\d+\.\d+)$'
   version-template: '{1}'
   versioning: semver
-  version: 1.22.0
+  version: 1.22.1
   # The release tag is built with its Cargo.lock, and cargo checks every crate
   # it downloads against the checksum there.
   git:
     url: https://github.com/VirusTotal/yara-x.git
     tag: v{version}
-    commit: e27597f2c05e13fe1c2bb459781aef8899afc485
+    commit: 198fa48a5fbab79b88edc9bb16df99da4caffe91
   extra-artifacts:
     # The Rust release manifest, signed with the Rust release key. The build
     # installs rustc, cargo, rust-std and rust-src from the archives it lists,
