@@ -41,11 +41,11 @@ upstream:
     # each checked against the SHA-256 the manifest gives. The reconciler moves
     # version and sha256 to each new stable release once it is a day old.
     rust-toolchain:
-      version: 1.99.1
+      version: 1.100.0
       url: https://static.rust-lang.org/dist/channel-rust-{version}.toml
       checksums: {url: 'https://static.rust-lang.org/dist/channel-rust-{version}.toml.sha256', algorithm: sha256}
       signature: https://static.rust-lang.org/dist/channel-rust-{version}.toml.asc
-      sha256: fb152be80975c194aa5fc684b2aec3a6e14e2b855efe2faa4e5f8ae6e590f463
+      sha256: 3051e859570f64a8c5acb9d09e87425db52c7d97287c67e8f6d57d7d34ef9258
       track:
         source: html-index
         url: https://static.rust-lang.org/dist/channel-rust-stable.toml
