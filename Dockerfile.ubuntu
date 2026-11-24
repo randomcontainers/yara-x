@@ -195,7 +195,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN --mount=type=bind,from=build,source=/out/usr/local/share/randomcontainers/yara-x/runtime-deps,target=/tmp/runtime-deps \
     set -eu; \
     apt-get update; \
-    xargs apt-get install -y --no-install-recommends ca-certificates tini < /tmp/runtime-deps; \
+    xargs apt-get install -y --no-install-recommends ca-certificates tini tzdata < /tmp/runtime-deps; \
     rm -rf /var/lib/apt/lists/*; \
     install -d -m 1777 /work /cache
 COPY --link --from=build /out/usr/local/ /usr/local/
